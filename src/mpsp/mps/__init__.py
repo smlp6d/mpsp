@@ -1,4 +1,6 @@
 from json import loads, dumps
+from os import path
+from hashlib import sha512
 
 import rsa
 
@@ -9,7 +11,8 @@ class mps:
             sock, encoding: str = 'utf-8', package_max_size: int = 1000, proto_name: str = 'mps',
             split_symbol: str = '$',
             config_encoding: str = 'utf-8', config_p0_size: int = 1000,
-            key_size: int = 512
+            key_size: int = 512, const_key: bool = False, key_file: str = '.mp.chain', save_pub: bool = False,
+            pub_file: str = '.mp.pub_d', console_log: bool = False
     ):
         self.sock = sock
         self.size = package_max_size
@@ -19,9 +22,25 @@ class mps:
         self.config_p0_size = config_p0_size
         self.config_encoding = config_encoding
 
+        self.save_pub = save_pub
+        self.pub_file = pub_file
+        self.console_log = console_log
+
         self.key_size = key_size
-        (self.pub_key, self.pri_key) = rsa.newkeys(key_size)
-        self.pubkey_pem = self.pub_key.save_pkcs1()
+        if path.isfile(key_file) and const_key:
+            with open(key_file, 'rb') as f:
+                kf = f.read().split(b'\n\n')
+            self.pub_key = rsa.PublicKey.load_pkcs1(kf[0] + b'\n', 'PEM')
+            self.pri_key = rsa.PrivateKey.load_pkcs1(kf[1], 'PEM')
+            self.pubkey_pem = kf[0] + b'\n'
+        elif not path.isfile(key_file) and const_key:
+            (self.pub_key, self.pri_key) = rsa.newkeys(key_size)
+            self.pubkey_pem = self.pub_key.save_pkcs1()
+            with open(key_file, 'wb') as f:
+                f.write(self.pub_key.save_pkcs1() + b'\n' + self.pri_key.save_pkcs1())
+        else:
+            (self.pub_key, self.pri_key) = rsa.newkeys(key_size)
+            self.pubkey_pem = self.pub_key.save_pkcs1()
 
     def set_handshake(self):
         config = dumps({
@@ -60,7 +79,19 @@ class mps:
                 (self.pub_key, self.pri_key) = rsa.newkeys(config['key_size'])
                 self.pubkey_pem = self.pub_key.save_pkcs1()
 
-            self.shake_pubkey = rsa.PublicKey.load_pkcs1(self.recv_raw(False), 'PEM')
+            shake_pubkey_pem = self.recv_raw(False)
+
+            if path.isfile(self.pub_file) and self.save_pub:
+                with open(self.pub_file, 'r') as f:
+                    if not f.read() == sha512(shake_pubkey_pem).hexdigest():
+                        if self.console_log:
+                            print('#mpsp : incorrect pub_key')
+                        return False
+            elif not path.isfile(self.pub_file) and self.save_pub:
+                with open(self.pub_file, 'w') as f:
+                    f.write(sha512(shake_pubkey_pem).hexdigest())
+
+            self.shake_pubkey = rsa.PublicKey.load_pkcs1(shake_pubkey_pem, 'PEM')
             self.send_raw(self.pubkey_pem, False)
 
             return True
@@ -145,6 +176,12 @@ class mps:
 
     def recv(self, encrypted=True):
         return self.recv_raw(encrypted).decode(self.encoding)
+
+    def calc_pub_sha(self):
+        return sha512(self.pubkey_pem).hexdigest()
+
+    def calc_shake_pub_sha(self):
+        return sha512(self.shake_pubkey.save_pkcs1()).hexdigest()
 
     def close(self):
         self.sock.close()
